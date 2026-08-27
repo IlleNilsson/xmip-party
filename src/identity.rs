@@ -17,9 +17,16 @@ use std::fmt;
 /// What an identity is configured for.
 ///
 /// A Party's identities are per purpose because they genuinely differ, and they
-/// differ in kind rather than only in value: receiving needs something to
-/// *match against*, the other two need something to *prove with*. ADR-0019
-/// clause 4.
+/// differ in kind rather than only in value. Two of the four match something
+/// arriving and need no secret; two produce proof and name where the material
+/// is kept. ADR-0019 clause 4.
+///
+/// ```text
+/// Receive    a partner arrives          matcher
+/// Operate    a person drives Xmip       matcher
+/// Process    Xmip runs as somebody      credential
+/// Send       Xmip is the client         credential
+/// ```
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Purpose {
     /// Verified when it arrives. A Receive Location names the Parties it takes,
@@ -35,13 +42,27 @@ pub enum Purpose {
     /// Offered when Xmip is the client. ADR-0006 resolves which one, inheriting
     /// up through Send Port and Send Port Group to the Sending Process.
     Send,
+    /// Who is driving Xmip itself.
+    ///
+    /// The CLI, the PowerShell module, the MAUI desktop GUI and the Blazor web
+    /// GUI all authenticate somebody, and that somebody is a Party like any
+    /// other — a person rather than a trading partner, but recognised the same
+    /// way. ADR-0014.
+    ///
+    /// Matched, not presented: the operator proves themselves to Xmip, so this
+    /// stores a matcher and no secret, exactly as [`Purpose::Receive`] does.
+    ///
+    /// ADR-0009 still applies. Recognising an operator is not granting them
+    /// anything; a Party is recognised, a role is granted.
+    Operate,
 }
 
 impl Purpose {
     /// Whether this purpose requires credential material rather than a matcher.
     ///
-    /// Receiving compares an arriving credential against a stored name and
-    /// needs no secret. Processing and sending both mean producing proof.
+    /// Receiving and operating both compare an arriving credential against a
+    /// stored name and need no secret. Processing and sending mean producing
+    /// proof, so both name where the material is kept.
     #[must_use]
     pub const fn needs_credential(self) -> bool {
         matches!(self, Self::Process | Self::Send)
@@ -54,6 +75,7 @@ impl fmt::Display for Purpose {
             Self::Receive => "receive",
             Self::Process => "process",
             Self::Send => "send",
+            Self::Operate => "operate",
         })
     }
 }
@@ -494,6 +516,18 @@ pub struct Identity {
 }
 
 impl Identity {
+    /// An operator driving Xmip through one of its surfaces. Matched, like an
+    /// arrival, and no secret is kept.
+    #[must_use]
+    pub fn operating(mechanism: Mechanism, value: impl Into<String>) -> Self {
+        Self {
+            mechanism,
+            purpose: Purpose::Operate,
+            value: value.into(),
+            credential: None,
+        }
+    }
+
     /// Something arriving is matched against. No secret is needed or kept.
     #[must_use]
     pub fn receiving(mechanism: Mechanism, value: impl Into<String>) -> Self {
@@ -773,6 +807,18 @@ mod tests {
         let matcher = Identity::receiving(mechanism::mutual_tls(), "CN=partner-x.example");
 
         assert!(matcher.context().is_none());
+    }
+
+    #[test]
+    fn an_operator_is_a_party_recognised_the_same_way_as_any_other() {
+        // A person driving the CLI, the PowerShell module or either GUI. The
+        // passkey exists for exactly this population.
+        let operator = Identity::operating(mechanism::passkey(), "ilian@consid.se");
+
+        assert_eq!(operator.purpose, Purpose::Operate);
+        assert!(!operator.purpose.needs_credential());
+        assert!(operator.credential.is_none());
+        assert!(operator.context().is_none());
     }
 
     #[test]
