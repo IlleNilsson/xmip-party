@@ -8,12 +8,9 @@
 
 pub mod identity;
 
-pub use identity::{
-    mechanism, Assurance, CredentialRef, Identity, IdentityClass, IdentityContext, Layer,
-    Mechanism, Purpose,
-};
+pub use identity::Identity;
 
-use xmip_core::PartyId;
+use xmip_core::{PartyId, Purpose};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PartyKind {
@@ -85,6 +82,7 @@ impl Party {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xmip_core::{mechanism, CredentialRef, IdentityClass, Layer};
 
     fn partner() -> Party {
         Party::new(PartyId::new(1), PartyKind::Organization, "partner-x")
