@@ -9,8 +9,8 @@
 pub mod identity;
 
 pub use identity::{
-    mechanism, Assurance, CredentialRef, Direction, Identity, IdentityClass, IdentityContext,
-    Layer, Mechanism,
+    mechanism, Assurance, CredentialRef, Identity, IdentityClass, IdentityContext, Layer,
+    Mechanism, Purpose,
 };
 
 use xmip_core::PartyId;
@@ -23,7 +23,7 @@ pub enum PartyKind {
     Service,
 }
 
-/// One actor, and every way it is recognised in either direction.
+/// One actor, and every way it is recognised or acted under.
 ///
 /// **A Party is a shortcut to an Identity, and grants nothing.** Resolving a
 /// credential to a Party is a registry lookup, not a decision: the arrival is
@@ -61,22 +61,22 @@ impl Party {
         self
     }
 
-    /// Every identity this Party is recognised by, or presents.
-    pub fn facing(&self, direction: Direction) -> impl Iterator<Item = &Identity> {
+    /// Every identity configured for one purpose.
+    pub fn configured_for(&self, purpose: Purpose) -> impl Iterator<Item = &Identity> {
         self.identities
             .iter()
-            .filter(move |identity| identity.direction == direction)
+            .filter(move |identity| identity.purpose == purpose)
     }
 
-    /// The value this Party carries under one mechanism, in one direction.
+    /// The value this Party carries under one mechanism, for one purpose.
     ///
     /// Both are required. Asking for "the mutual-tls identity" without saying
-    /// which way it faces is the question ADR-0019 clause 4 refuses: the
-    /// certificate a partner presents to Xmip is not the one Xmip presents to
-    /// that partner, and answering with either would be right half the time.
+    /// what for is the question ADR-0019 clause 4 refuses: the certificate a
+    /// partner presents to Xmip is not the one Xmip presents to that partner,
+    /// and answering with either would be right half the time.
     #[must_use]
-    pub fn identity(&self, mechanism: &str, direction: Direction) -> Option<&str> {
-        self.facing(direction)
+    pub fn identity(&self, mechanism: &str, purpose: Purpose) -> Option<&str> {
+        self.configured_for(purpose)
             .find(|identity| identity.mechanism.name() == mechanism)
             .map(|identity| identity.value.as_str())
     }
@@ -88,16 +88,21 @@ mod tests {
 
     fn partner() -> Party {
         Party::new(PartyId::new(1), PartyKind::Organization, "partner-x")
-            .with(Identity::accepted(
+            .with(Identity::receiving(
                 mechanism::mutual_tls(),
                 "CN=partner-x.example",
             ))
-            .with(Identity::accepted(mechanism::oauth2(), "sub=partner-x"))
-            .with(Identity::accepted(
+            .with(Identity::receiving(mechanism::oauth2(), "sub=partner-x"))
+            .with(Identity::receiving(
                 mechanism::edi_x12_interchange(),
                 "ISA06=PARTNERX",
             ))
-            .with(Identity::presented(
+            .with(Identity::processing(
+                mechanism::kerberos(),
+                "svc-partner-x@CORP.EXAMPLE",
+                CredentialRef::new("windows-credential-manager", "svc-partner-x"),
+            ))
+            .with(Identity::sending(
                 mechanism::ssh_key(),
                 "SHA256:abc",
                 CredentialRef::new("ssh-agent", "xmip-outbound"),
@@ -105,14 +110,21 @@ mod tests {
     }
 
     #[test]
-    fn receive_process_and_send_all_reach_the_same_registry() {
-        // One Party, four ways in and one way out. The alternative —
+    fn one_registry_serves_receive_process_and_send() {
+        // Three ways in, one to run as, one to go out with. The alternative —
         // credentials inline on every Receive and Send Location — makes a
         // certificate rotation a search across the estate rather than one edit.
         let party = partner();
 
-        assert_eq!(party.facing(Direction::Accepted).count(), 3);
-        assert_eq!(party.facing(Direction::Presented).count(), 1);
+        assert_eq!(party.configured_for(Purpose::Receive).count(), 3);
+        assert_eq!(party.configured_for(Purpose::Process).count(), 1);
+        assert_eq!(party.configured_for(Purpose::Send).count(), 1);
+
+        // Only the two that produce proof carry a reference to material.
+        assert!(party
+            .identities
+            .iter()
+            .all(|identity| identity.credential.is_some() == identity.purpose.needs_credential()));
     }
 
     #[test]
@@ -121,22 +133,22 @@ mod tests {
         // the registry must not do is make it look like every other accepted
         // identity — authorization has to be able to tell the difference.
         let claims_only = Party::new(PartyId::new(2), PartyKind::Organization, "partner-y").with(
-            Identity::accepted(mechanism::edi_x12_interchange(), "ISA06=PARTNERY"),
+            Identity::receiving(mechanism::edi_x12_interchange(), "ISA06=PARTNERY"),
         );
 
         assert_eq!(
-            claims_only.identity("edi-x12-interchange", Direction::Accepted),
+            claims_only.identity("edi-x12-interchange", Purpose::Receive),
             Some("ISA06=PARTNERY")
         );
         assert!(!claims_only
-            .facing(Direction::Accepted)
+            .configured_for(Purpose::Receive)
             .any(|identity| identity.mechanism.authenticates()));
     }
 
     #[test]
     fn a_party_holds_identities_in_several_classes_at_once() {
         let classes: Vec<IdentityClass> = partner()
-            .facing(Direction::Accepted)
+            .configured_for(Purpose::Receive)
             .map(|identity| identity.mechanism.class())
             .collect();
 
@@ -146,16 +158,16 @@ mod tests {
     }
 
     #[test]
-    fn direction_is_part_of_the_question() {
+    fn purpose_is_part_of_the_question() {
         let party = partner();
 
         assert_eq!(
-            party.identity("mutual-tls", Direction::Accepted),
+            party.identity("mutual-tls", Purpose::Receive),
             Some("CN=partner-x.example")
         );
-        assert_eq!(party.identity("mutual-tls", Direction::Presented), None);
+        assert_eq!(party.identity("mutual-tls", Purpose::Send), None);
         assert_eq!(
-            party.identity(mechanism::ssh_key().name(), Direction::Presented),
+            party.identity(mechanism::ssh_key().name(), Purpose::Send),
             Some("SHA256:abc")
         );
     }
@@ -171,7 +183,7 @@ mod tests {
         for mechanism in [mechanism::mutual_tls(), mechanism::oauth2()] {
             assert!(
                 party
-                    .identity(mechanism.name(), Direction::Accepted)
+                    .identity(mechanism.name(), Purpose::Receive)
                     .is_some(),
                 "{} is declared on the Party and was not found",
                 mechanism.name()
@@ -184,11 +196,11 @@ mod tests {
         let party = partner();
 
         let transport = party
-            .facing(Direction::Accepted)
+            .configured_for(Purpose::Receive)
             .filter(|identity| identity.mechanism.layer() == Layer::Transport)
             .count();
         let message = party
-            .facing(Direction::Accepted)
+            .configured_for(Purpose::Receive)
             .filter(|identity| identity.mechanism.layer() == Layer::Message)
             .count();
 
@@ -200,6 +212,6 @@ mod tests {
 
     #[test]
     fn an_unknown_mechanism_is_absent_rather_than_guessed() {
-        assert_eq!(partner().identity("kerberos", Direction::Accepted), None);
+        assert_eq!(partner().identity("kerberos", Purpose::Receive), None);
     }
 }

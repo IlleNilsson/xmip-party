@@ -14,18 +14,48 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-/// Which way an identity faces.
+/// What an identity is configured for.
 ///
-/// A Party's identities are per direction because they genuinely differ, and
-/// they differ in kind rather than only in value: accepting needs something to
-/// *match against*, presenting needs something to *prove with*. ADR-0019
+/// A Party's identities are per purpose because they genuinely differ, and they
+/// differ in kind rather than only in value: receiving needs something to
+/// *match against*, the other two need something to *prove with*. ADR-0019
 /// clause 4.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum Direction {
-    /// Verified when it arrives. A Receive Location names the Parties it takes.
-    Accepted,
-    /// Offered when Xmip is the client. ADR-0006 resolves which one.
-    Presented,
+pub enum Purpose {
+    /// Verified when it arrives. A Receive Location names the Parties it takes,
+    /// and an arriving credential is compared against a stored matcher.
+    Receive,
+    /// What a Process runs as.
+    ///
+    /// The consequential one. ADR-0022 clause 3 gives a host process the work
+    /// of exactly one identity context, so this identity is not only what the
+    /// Process acts as — it decides which host process the Process can be
+    /// placed in, and therefore how many host processes a node runs.
+    Process,
+    /// Offered when Xmip is the client. ADR-0006 resolves which one, inheriting
+    /// up through Send Port and Send Port Group to the Sending Process.
+    Send,
+}
+
+impl Purpose {
+    /// Whether this purpose requires credential material rather than a matcher.
+    ///
+    /// Receiving compares an arriving credential against a stored name and
+    /// needs no secret. Processing and sending both mean producing proof.
+    #[must_use]
+    pub const fn needs_credential(self) -> bool {
+        matches!(self, Self::Process | Self::Send)
+    }
+}
+
+impl fmt::Display for Purpose {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Receive => "receive",
+            Self::Process => "process",
+            Self::Send => "send",
+        })
+    }
 }
 
 /// Where an identity travels.
@@ -444,51 +474,85 @@ impl fmt::Display for CredentialRef {
     }
 }
 
-/// One way a Party is recognised, or one Xmip presents on its behalf.
+/// One way a Party is recognised, or one Xmip acts under on its behalf.
 ///
-/// The two directions carry different things, and that asymmetry is the point:
+/// The purposes carry different things, and that asymmetry is the point:
 ///
-/// - **Accepted** carries a *matcher* — `CN=partner-x.example`, `sub=partner-x`,
+/// - **Receive** carries a *matcher* — `CN=partner-x.example`, `sub=partner-x`,
 ///   `ISA06=PARTNERX`. Comparing an arriving credential against it needs no
 ///   secret, so nothing secret is stored.
-/// - **Presented** carries a [`CredentialRef`] as well, because presenting means
-///   producing the proof.
+/// - **Process** and **Send** carry a [`CredentialRef`] as well, because both
+///   mean producing the proof.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Identity {
     pub mechanism: Mechanism,
-    pub direction: Direction,
+    pub purpose: Purpose,
     /// The value under that mechanism.
     pub value: String,
-    /// Where the material lives. Always `None` when accepted.
+    /// Where the material lives. Always `None` for [`Purpose::Receive`].
     pub credential: Option<CredentialRef>,
 }
 
 impl Identity {
     /// Something arriving is matched against. No secret is needed or kept.
     #[must_use]
-    pub fn accepted(mechanism: Mechanism, value: impl Into<String>) -> Self {
+    pub fn receiving(mechanism: Mechanism, value: impl Into<String>) -> Self {
         Self {
             mechanism,
-            direction: Direction::Accepted,
+            purpose: Purpose::Receive,
             value: value.into(),
             credential: None,
         }
     }
 
-    /// Something Xmip offers. Presenting needs the material, so this names
-    /// where it is kept.
+    /// What a Process runs as, and therefore what decides its host process.
     #[must_use]
-    pub fn presented(
+    pub fn processing(
         mechanism: Mechanism,
         value: impl Into<String>,
         credential: CredentialRef,
     ) -> Self {
         Self {
             mechanism,
-            direction: Direction::Presented,
+            purpose: Purpose::Process,
             value: value.into(),
             credential: Some(credential),
         }
+    }
+
+    /// Something Xmip offers as a client. Presenting needs the material, so
+    /// this names where it is kept.
+    #[must_use]
+    pub fn sending(
+        mechanism: Mechanism,
+        value: impl Into<String>,
+        credential: CredentialRef,
+    ) -> Self {
+        Self {
+            mechanism,
+            purpose: Purpose::Send,
+            value: value.into(),
+            credential: Some(credential),
+        }
+    }
+
+    /// The identity context this runs under. ADR-0022 clause 2.
+    ///
+    /// Only meaningful for [`Purpose::Process`] and [`Purpose::Send`], which
+    /// hold credential material that a host process would keep in memory. A
+    /// receive-side matcher holds nothing, so it isolates nothing.
+    #[must_use]
+    pub fn context(&self) -> Option<IdentityContext> {
+        if !self.purpose.needs_credential() {
+            return None;
+        }
+
+        let context = IdentityContext::new(&self.mechanism).with("principal", self.value.clone());
+
+        Some(match &self.credential {
+            Some(credential) => context.with("credential", credential.to_string()),
+            None => context,
+        })
     }
 }
 
@@ -663,9 +727,9 @@ mod tests {
     }
 
     #[test]
-    fn accepting_stores_a_matcher_and_presenting_stores_a_reference() {
-        let accepted = Identity::accepted(mechanism::mutual_tls(), "CN=partner-x.example");
-        let presented = Identity::presented(
+    fn receiving_stores_a_matcher_and_the_other_two_store_a_reference() {
+        let receiving = Identity::receiving(mechanism::mutual_tls(), "CN=partner-x.example");
+        let sending = Identity::sending(
             mechanism::ssh_key(),
             "SHA256:abc",
             CredentialRef::new("ssh-agent", "xmip-outbound"),
@@ -673,11 +737,42 @@ mod tests {
 
         // Nothing secret is kept for the receive side, because matching an
         // arriving credential against a name needs no secret.
-        assert!(accepted.credential.is_none());
+        assert!(receiving.credential.is_none());
+        assert!(!receiving.purpose.needs_credential());
         assert_eq!(
-            presented.credential.as_ref().map(ToString::to_string),
+            sending.credential.as_ref().map(ToString::to_string),
             Some("ssh-agent:xmip-outbound".to_string())
         );
+    }
+
+    #[test]
+    fn what_a_process_runs_as_decides_its_host_process() {
+        // ADR-0022 clause 3. Two Processes under different service accounts
+        // cannot share a host process, because a process holds tickets and
+        // session keys and the operating system is the only thing enforcing
+        // the boundary.
+        let one = Identity::processing(
+            mechanism::kerberos(),
+            "svc-orders@CORP.EXAMPLE",
+            CredentialRef::new("windows-credential-manager", "svc-orders"),
+        );
+        let other = Identity::processing(
+            mechanism::kerberos(),
+            "svc-billing@CORP.EXAMPLE",
+            CredentialRef::new("windows-credential-manager", "svc-billing"),
+        );
+
+        let one = one.context().expect("a process runs as something");
+        let other = other.context().expect("a process runs as something");
+
+        assert!(!one.may_share_host_process(&other));
+    }
+
+    #[test]
+    fn a_receive_matcher_isolates_nothing_because_it_holds_nothing() {
+        let matcher = Identity::receiving(mechanism::mutual_tls(), "CN=partner-x.example");
+
+        assert!(matcher.context().is_none());
     }
 
     #[test]
