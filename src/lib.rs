@@ -82,7 +82,7 @@ impl Party {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xmip_core::{mechanism, CredentialRef, IdentityClass, Layer};
+    use xmip_core::{CredentialRef, IdentityClass, Layer, mechanism};
 
     fn partner() -> Party {
         Party::new(PartyId::new(1), PartyKind::Organization, "partner-x")
@@ -119,10 +119,11 @@ mod tests {
         assert_eq!(party.configured_for(Purpose::Send).count(), 1);
 
         // Only the two that produce proof carry a reference to material.
-        assert!(party
-            .identities
-            .iter()
-            .all(|identity| identity.credential.is_some() == identity.purpose.needs_credential()));
+        assert!(
+            party.identities.iter().all(
+                |identity| identity.credential.is_some() == identity.purpose.needs_credential()
+            )
+        );
     }
 
     #[test]
@@ -138,9 +139,11 @@ mod tests {
             claims_only.identity("edi-x12-interchange", Purpose::Receive),
             Some("ISA06=PARTNERY")
         );
-        assert!(!claims_only
-            .configured_for(Purpose::Receive)
-            .any(|identity| identity.mechanism.authenticates()));
+        assert!(
+            !claims_only
+                .configured_for(Purpose::Receive)
+                .any(|identity| identity.mechanism.authenticates())
+        );
     }
 
     #[test]
@@ -180,9 +183,7 @@ mod tests {
 
         for mechanism in [mechanism::mutual_tls(), mechanism::oauth2()] {
             assert!(
-                party
-                    .identity(mechanism.name(), Purpose::Receive)
-                    .is_some(),
+                party.identity(mechanism.name(), Purpose::Receive).is_some(),
                 "{} is declared on the Party and was not found",
                 mechanism.name()
             );
