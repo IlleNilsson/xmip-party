@@ -108,6 +108,7 @@ mod tests {
     use super::*;
     use xmip_core::mechanism;
 
+    #[test]
     fn receiving_stores_a_matcher_and_the_other_two_store_a_reference() {
         let receiving = Identity::receiving(mechanism::mutual_tls(), "CN=partner-x.example");
         let sending = Identity::sending(
