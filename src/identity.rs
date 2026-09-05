@@ -7,7 +7,7 @@
 //! verify something arriving and a credential reference for the two that
 //! produce proof. ADR-0019 clause 4.
 
-use xmip_core::{CredentialRef, IdentityContext, Mechanism, Purpose};
+use xcore::{CredentialRef, IdentityContext, Mechanism, Purpose};
 
 /// One way a Party is recognised, or one Xmip acts under on its behalf.
 ///
@@ -106,7 +106,7 @@ impl Identity {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xmip_core::mechanism;
+    use xcore::mechanism;
 
     #[test]
     fn receiving_stores_a_matcher_and_the_other_two_store_a_reference() {
